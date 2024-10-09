@@ -1,0 +1,399 @@
+module TopModule(
+    input clk,
+    input reset_n,
+    output [31:0] result,       // Result output
+    output [31:0] pc_value      // Program counter output
+);
+
+    // Wires for interconnecting modules
+    wire [31:0] instruction;
+    wire [31:0] current_pc;
+    wire [3:0] operation;
+    wire [4:0] src1_addr, src2_addr, dest_addr;
+    wire [31:0] operand_a, operand_b, write_data;
+    wire [31:0] imm;
+    wire use_imm, branch_taken;
+    wire reg_write, mem_write, is_load_store;
+
+    // Instantiate the Program Counter
+    Program_Counter pc_inst (
+        .clk(clk),
+        .reset_n(reset_n),
+        .branch_flag(branch_taken),
+        .instruction_in(instruction),
+        .pc_value(current_pc)
+    );
+
+    // Instantiate the Decode Unit
+    DecodUnit #(32) decode_inst (
+        .clk(clk),
+        .reset_n(reset_n),
+        .current_instruction(instruction),
+        .current_pc(current_pc),
+        .operation(operation),
+        .src1_addr(src1_addr),
+        .src2_addr(src2_addr),
+        .dest_addr(dest_addr),
+        .imm(imm),
+        .use_imm(use_imm),
+        .is_load_store(is_load_store)
+    );
+
+    // Instantiate the Register File
+    registerfile #(32) regfile_inst (
+        .clk(clk),
+        .reset_n(reset_n),
+        .src1_addr(src1_addr),
+        .src2_addr(src2_addr),
+        .dest_addr(dest_addr),
+        .operand_a(operand_a),
+        .operand_b(operand_b),
+        .write_data(write_data),
+        .wr_en(reg_write)  // Assuming reg_write is determined in the execution stage
+    );
+
+    // Instantiate the Execution Unit
+    execution_unit exec_inst (
+        .clk(clk),
+        .reset_n(reset_n),
+        .operation(operation),
+        .imm(imm),
+        .use_imm(use_imm),
+        .operand_a(operand_a),
+        .operand_b(operand_b),
+        .branch_taken(branch_taken),
+        .result(write_data)
+    );
+
+    // Instantiate the Memory Unit
+    MemoryUnit mem_inst (
+        .clk(clk),
+        .wr_en(mem_write),
+        .addr(current_pc),  // Assuming you would derive an address from the current_pc or result
+        .write_data(write_data),
+        .read_data(instruction)  // Connect to instruction fetching or other needs
+    );
+
+    // Instantiate the Write Back Unit
+    WriteBackUnit wb_inst (
+        .clk(clk),
+        .regWrite(reg_write),
+        .writeReg(dest_addr),
+        .writeData(write_data),
+        .regFile() // You may want to connect this to an output or register file for further access
+    );
+
+    // Connect the output of the Program Counter
+    assign pc_value = current_pc;
+
+endmodule
+
+
+
+//Fetch Unit
+
+module Program_Counter(
+    input clk,
+    input reset_n,
+    input branch_flag,
+    input [31:0] instruction_in,
+    output reg [31:0] pc_value
+);
+
+  always @(posedge clk or negedge reset_n)
+begin
+  if (!reset_n) 
+    begin
+        pc_value <= 32'b0;  
+    end
+    else
+    begin
+        if (branch_flag) 
+        begin
+            pc_value <= instruction_in[31:20];  
+        end 
+        else 
+        begin
+            pc_value <= pc_value + 4; 
+        end
+    end
+end
+
+endmodule
+
+
+
+//Decode Unit
+
+module DecodUnit#(parameter xlen = 32)(
+  input clk,                 // posedge
+  input wire reset_n,         // Active low; synchronous
+
+  input wire [xlen-1:0] current_instruction,  // Received from Fetch unit
+  input wire [xlen-1:0] current_pc,   // Received from Fetch unit
+
+  output reg [3:0] operation,  // sent to the EX
+  output reg [$clog2(xlen)-1:0] src1_addr, // Sent to the Register file
+  output reg [$clog2(xlen)-1:0] src2_addr, // Sent to the Register file
+  output reg [$clog2(xlen)-1:0] dest_addr, // Sent to the Register file
+
+  output reg [xlen-1:0] imm,  // sent to the EX
+  output reg use_imm,  // sent to the EX
+  output reg is_load_store // Sent to the memory and writeback unit
+);
+
+  // Intermediate signals for instruction decoding
+  reg [6:0] opcode;
+  reg [2:0] funct3;
+  reg [6:0] funct7;
+
+  // Enum definition for operations
+  typedef enum logic [4:0] {
+    ADD,
+    SUB,
+    SLT,
+    SLTU,
+    XOR,
+    OR,
+    AND,
+    SLL, 
+    SRA,   
+    SRL,
+    ADDI,
+    SLTI,
+    SLTIU,
+    XORI,
+    ORI,
+    ANDI,
+    SLLI,
+    SRLI,
+    SRAI
+  } operation_t;
+
+  always @(posedge clk or negedge reset_n) begin
+    if (!reset_n) begin 
+      // Synchronous reset
+      operation <= 0;
+      src1_addr <= 0;
+      src2_addr <= 0;
+      dest_addr <= 0;
+      imm <= 0;
+      use_imm <= 0;
+      is_load_store <= 0;
+    end 
+    else begin
+      // Extract instruction fields
+      opcode <= current_instruction[6:0];
+      dest_addr <= current_instruction[11:7];
+      funct3 <= current_instruction[14:12];
+      src1_addr <= current_instruction[19:15];
+      src2_addr <= current_instruction[24:20];
+      funct7 <= current_instruction[31:25];
+      
+      // Decode the instruction
+      case (opcode)
+        7'b0110011: begin   // R-Type
+          use_imm <= 0;
+          case (funct3)
+            3'b000: operation <= (funct7 == 7'b0000000) ? ADD : SUB;
+            3'b001: operation <= SLL;
+            3'b010: operation <= SLT;
+            3'b011: operation <= SLTU;
+            3'b100: operation <= XOR;
+            3'b101: operation <= (funct7 == 7'b0000000) ? SRL : SRA;
+            3'b110: operation <= OR;
+            3'b111: operation <= AND;
+            default: operation <= 0;
+          endcase
+        end
+        
+        7'b0010011: begin  // I-Type
+          use_imm <= 1;
+          imm <= {{20{current_instruction[31]}}, current_instruction[31:20]}; // Immediate value with sign extension
+          case (funct3)
+            3'b000: operation <= ADDI;
+            3'b010: operation <= SLTI;
+            3'b011: operation <= SLTIU;
+            3'b100: operation <= XORI;
+            3'b110: operation <= ORI;
+            3'b111: operation <= ANDI;
+            3'b001: operation <= SLLI;
+            3'b101: operation <= (funct7 == 7'b0000000) ? SRLI : SRAI;
+            default: operation <= 0;
+          endcase
+        end
+        
+        default: begin
+          // Handle other opcodes like load/store here
+          operation <= 0;
+          use_imm <= 0;
+          is_load_store <= 0;
+        end
+      endcase
+    end
+  end
+
+endmodule
+
+
+
+//Execute
+
+module execution_unit (
+    input clk,                 
+    input wire reset_n,         // Active low; synchronous
+
+    input wire [3:0] operation,  // Received from decoder
+    input wire [31:0] imm,       // Received from decoder (assuming xlen=32)
+    input wire use_imm,          // Received from decoder
+    input wire [31:0] operand_a, // rs1; Received from register file
+    input wire [31:0] operand_b, // rs2; Received from register file
+
+    output reg branch_taken,      // Sent to the fetch
+    output reg [31:0] result      // Sent to the memory unit and writeback
+);
+
+    always @(posedge clk or negedge reset_n) begin
+        if (!reset_n) begin
+            branch_taken <= 0;
+            result <= 0;
+        end else begin
+            case (operation)
+                4'b0000: begin // ADD
+                    result <= operand_a + operand_b;
+                    branch_taken <= 0;
+                end
+                4'b0001: begin // SUB
+                    result <= operand_a - operand_b;
+                    branch_taken <= 0;
+                end
+                4'b0010: begin // AND
+                    result <= operand_a && operand_b;
+                    branch_taken <= 0;
+                end
+                4'b0011: begin // OR
+                    result <= operand_a || operand_b;
+                    branch_taken <= 0;
+                end
+                4'b0100: begin // XOR
+                    result <= operand_a ^ operand_b;
+                    branch_taken <= 0;
+                end
+                4'b0101: begin // SLT (Set Less Than)
+                    result <= (operand_a < operand_b) ? 1 : 0;
+                    branch_taken <= 0;
+                end
+                4'b0110: begin // SLTI (Set Less Than Immediate)
+                    result <= (operand_a < imm) ? 1 : 0;
+                    branch_taken <= 0;
+                end
+                4'b0111: begin // BEQ (Branch if Equal)
+                    branch_taken <= (operand_a == operand_b);
+                    result <= 0; // result not used
+                end
+                4'b1000: begin // BNE (Branch if Not Equal)
+                    branch_taken <= (operand_a != operand_b);
+                    result <= 0; // result not used
+                end
+                4'b1001: begin // JALR (Jump and Link Register)
+                    result <= operand_a + imm;
+                    branch_taken <= 1;
+                end
+                default: begin
+                    result <= 0;
+                    branch_taken <= 0;
+                end
+            endcase
+            
+            // Handle immediate operations if use_imm is set
+            if (use_imm) begin
+                // Here we could implement operations using imm, if needed
+            end
+        end
+    end
+endmodule
+
+
+
+// Register File
+
+module registerfile #(xlen = 32)(
+  input clk, reset_n,
+  input wire [$clog2(xlen)-1:0] src1_addr,  //all 3 from decoder to register file
+  input wire [$clog2(xlen)-1:0] src2_addr,
+  input wire [$clog2(xlen)-1:0] dest_addr,
+  
+  output wire [xlen-1:0] operand_a, //both from register file to execution
+  output wire [xlen-1:0] operand_b,
+  
+  input wire [xlen-1:0] write_data, // from execution to register file(data for destination
+  input reg wr_en);   // Execution to register file 
+  
+  reg [31:0] reg_file[31:0];
+  
+  assign operand_a = (src1_addr == 0) ? 32'b0 : reg_file[src1_addr]; // Send Src 1 & 2 value to Execution
+  assign operand_b = (src2_addr == 0) ? 32'b0 : reg_file[src2_addr];  
+  
+  always@(posedge clk) begin
+    if(wr_en && dest_addr != 0)
+      reg_file[dest_addr] = write_data;
+    else 
+      reg_file[dest_addr] = 32'b0;
+//       wr_en = 0;
+    
+  end
+endmodule
+
+
+
+// Memory Unit
+
+module MemoryUnit (
+    input wire clk,               // Clock signal
+    input wire reset_n,             // Asynchronous reset (active low)
+    input wire wr_en,                // Write enable (1 = write, 0 = read)
+    input wire [31:0] addr,       // Address for memory access
+    input wire [31:0] write_data,      // Data to write into memory
+    output reg [31:0] read_data       // Data read from memory
+);
+
+    // Memory array: assuming a memory of 1024 32-bit words
+    reg [31:0] memory_array [0:1023];
+
+    // Memory read/write logic
+    always @(posedge clk or negedge reset_n) begin
+        if (!reset_n) begin
+            // Reset logic: you can initialize memory here if needed
+            read_data <= 32'b0;
+        end 
+      else if (wr_en) begin
+            // Write operation
+            memory_array[addr[9:0]] <= write_data; // Write data at the address (considering only 10 LSBs for 1024 memory)
+        end 
+        else begin
+            // Read operation
+            read_data <= memory_array[addr[9:0]]; // Read data from the address
+        end
+    end
+endmodule
+
+
+
+//Write Back
+
+module WriteBackUnit (
+    input wire clk,
+    input wire regWrite,           // Control signal for writing to register
+    input wire [4:0] writeReg,     // Register address to write to
+    input wire [31:0] writeData,    // Data to write into the register
+    output reg [31:0] regFile [0:31] // 32 registers
+);
+    always @(posedge clk) begin
+        if (regWrite) begin
+            regFile[writeReg] <= writeData; // Write back to the register
+        end
+    end
+endmodule
+
+
+
